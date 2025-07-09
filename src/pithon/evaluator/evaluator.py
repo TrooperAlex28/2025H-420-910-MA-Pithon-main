@@ -3,9 +3,10 @@ from pithon.evaluator.primitive import check_type, get_primitive_dict
 from pithon.syntax import (
     PiAssignment, PiBinaryOperation, PiNumber, PiBool, PiStatement, PiProgram, PiSubscript, PiVariable,
     PiIfThenElse, PiNot, PiAnd, PiOr, PiWhile, PiNone, PiList, PiTuple, PiString,
-    PiFunctionDef, PiFunctionCall, PiFor, PiBreak, PiContinue, PiIn, PiReturn
+    PiFunctionDef, PiFunctionCall, PiFor, PiBreak, PiContinue, PiIn, PiReturn,
+    PiClassDef, PiAttribute, PiAttributeAssignment
 )
-from pithon.evaluator.envvalue import EnvValue, VFunctionClosure, VList, VNone, VTuple, VNumber, VBool, VString
+from pithon.evaluator.envvalue import EnvValue, VFunctionClosure, VList, VNone, VTuple, VNumber, VBool, VString, VObject, VClassDef, VMethodClosure
 
 
 def initial_env() -> EnvFrame:
@@ -131,6 +132,15 @@ def evaluate_stmt(node: PiStatement, env: EnvFrame) -> EnvValue:
     elif isinstance(node, PiIn):
         return _evaluate_in(node, env)
 
+    elif isinstance(node, PiClassDef):
+        return _evaluate_class_def(node, env)
+
+    elif isinstance(node, PiAttribute):
+        return _evaluate_attribute(node, env)
+
+    elif isinstance(node, PiAttributeAssignment):
+        return _evaluate_attribute_assignment(node, env)
+
     elif isinstance(node, PiSubscript):
         return _evaluate_subscript(node, env)
 
@@ -208,16 +218,32 @@ def _evaluate_in(node: PiIn, env: EnvFrame) -> EnvValue:
 
 def _evaluate_function_call(node: PiFunctionCall, env: EnvFrame) -> EnvValue:
     """Évalue un appel de fonction (primitive ou définie par l'utilisateur)."""
-    func_val = evaluate_stmt(node.function, env)
+    like_a_function = evaluate_stmt(node.function, env)
     args = [evaluate_stmt(arg, env) for arg in node.args]
     # Fonction primitive
-    if callable(func_val):
-        return func_val(args)
+    if callable(like_a_function):
+        return like_a_function(args)
     # Fonction utilisateur
-    if not isinstance(func_val, VFunctionClosure):
-        raise TypeError("Tentative d'appel d'un objet non-fonction.")
-    funcdef = func_val.funcdef
-    closure_env = func_val.closure_env
+    elif isinstance(like_a_function, VFunctionClosure):
+        return _call_vfunction_closure(like_a_function, args)
+    elif isinstance(like_a_function, VClassDef):   
+       methods = like_a_function.methods
+       my_init = methods["__init__"]
+       new_object = VObject(class_def=like_a_function, attributes={})
+       new_args = [new_object] + args
+       _call_vfunction_closure(my_init, new_args)
+       return new_object
+    elif isinstance(like_a_function, VMethodClosure):
+        func = like_a_function.function
+        obj = like_a_function.instance
+        new_args = [obj] + args
+        return _call_vfunction_closure(func, new_args)
+    else:
+        raise ValueError(f"Type de fonction non supporté")
+
+def _call_vfunction_closure(like_a_function: VFunctionClosure, args: list[EnvValue]) -> EnvValue:
+    funcdef = like_a_function.funcdef
+    closure_env = like_a_function.closure_env
     call_env = EnvFrame(parent=closure_env)
     for i, arg_name in enumerate(funcdef.arg_names):
         if i < len(args):
@@ -236,6 +262,40 @@ def _evaluate_function_call(node: PiFunctionCall, env: EnvFrame) -> EnvValue:
     except ReturnException as ret:
         return ret.value
     return result
+
+def _evaluate_class_def(node: PiClassDef, env: EnvFrame) -> EnvValue:
+    """Évalue une définition de classe."""
+    methods = {}
+    for method in node.methods:
+        methods[method.name] = VFunctionClosure(method, env)
+    class_def = VClassDef(node.name, methods)
+    insert(env, node.name, class_def)
+    return VNone(value=None)
+
+def _evaluate_attribute(node: PiAttribute, env: EnvFrame) -> EnvValue:
+    """Évalue l'accès à un attribut d'un objet."""
+    obj = evaluate_stmt(node.object, env)
+    if isinstance(obj, VObject):
+        # Recherche d'abord dans les attributs
+        if node.attr in obj.attributes:
+            return obj.attributes[node.attr]
+        # Ensuite dans les méthodes
+        if node.attr in obj.class_def.methods:
+            method = obj.class_def.methods[node.attr]
+            return VMethodClosure(method, obj)
+        raise AttributeError(f"L'objet n'a pas d'attribut '{node.attr}'")
+    else:
+        raise TypeError(f"L'accès aux attributs n'est supporté que pour les objets, pas {type(obj).__name__}")
+
+def _evaluate_attribute_assignment(node: PiAttributeAssignment, env: EnvFrame) -> EnvValue:
+    """Évalue l'assignation d'un attribut d'un objet."""
+    obj = evaluate_stmt(node.object, env)
+    value = evaluate_stmt(node.value, env)
+    if isinstance(obj, VObject):
+        obj.attributes[node.attr] = value
+        return value
+    else:
+        raise TypeError(f"L'assignation d'attributs n'est supportée que pour les objets, pas {type(obj).__name__}")
 
 class ReturnException(Exception):
     """Exception pour retourner une valeur depuis une fonction."""

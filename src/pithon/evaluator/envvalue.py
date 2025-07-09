@@ -43,10 +43,14 @@ class VTuple:
 class VNumber:
     """Représente un nombre (float)."""
     value: float
+    is_float: bool = False  # Marque si c'est explicitement un float (résultat de division)
 
     def __str__(self) -> str:
-        return str(self.value)
-
+        # Si c'est marqué comme float ou si ce n'est pas un entier, afficher avec décimales
+        if self.is_float or self.value != int(self.value):
+            return str(self.value)
+        # Sinon afficher comme entier
+        return str(int(self.value))
 
     def __repr__(self) -> str:
         return repr(self.value)
@@ -57,7 +61,7 @@ class VBool:
     value: bool
 
     def __str__(self) -> str:
-        return str(self.value)
+        return "True" if self.value else "False"
 
     def __repr__(self) -> str:
         return repr(self.value)

@@ -60,7 +60,7 @@ def primitive_div(args: list[EnvValue]):
     if isinstance(a, VNumber) and isinstance(b, VNumber):
         if b.value == 0:
             raise ZeroDivisionError("Division par zéro")
-        return VNumber(a.value / b.value)
+        return VNumber(a.value / b.value, is_float=True)
     raise TypeError(f"Division non supportée entre {type(a).__name__} et {type(b).__name__}")
 
 def primitive_mod(args: list[EnvValue]):
