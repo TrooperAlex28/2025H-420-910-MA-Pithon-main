@@ -155,7 +155,14 @@ def _check_valid_piandor_type(obj):
 def _evaluate_while(node: PiWhile, env: EnvFrame) -> EnvValue:
     """Évalue une boucle while."""
     last_value = VNone(value=None)
+    iteration_count = 0
+    max_iterations = 10000  # Protection contre les boucles infinies
+    
     while True:
+        iteration_count += 1
+        if iteration_count > max_iterations:
+            raise RuntimeError(f"Boucle while a dépassé {max_iterations} itérations, possible boucle infinie")
+        
         cond = evaluate_stmt(node.condition, env)
         cond = check_type(cond, VBool)
         if not cond.value:
@@ -166,16 +173,28 @@ def _evaluate_while(node: PiWhile, env: EnvFrame) -> EnvValue:
             break
         except ContinueException:
             continue
+        except Exception as e:
+            # Propager les erreurs avec contexte de la boucle
+            raise type(e)(f"Erreur dans la boucle while (itération {iteration_count}): {str(e)}") from e
     return last_value
 
 def _evaluate_for(node: PiFor, env: EnvFrame) -> EnvValue:
     """Évalue une boucle for."""
     iterable_val = evaluate_stmt(node.iterable, env)
     if not isinstance(iterable_val, (VList, VTuple)):
-        raise TypeError("La boucle for attend une liste ou un tuple.")
+        actual_type = type(iterable_val).__name__
+        raise TypeError(f"La boucle for attend une liste ou un tuple, reçu {actual_type}")
+    
     last_value = VNone(value=None)
     iterable = iterable_val.value
+    iteration_count = 0
+    max_iterations = 10000  # Protection contre les boucles infinies
+    
     for item in iterable:
+        iteration_count += 1
+        if iteration_count > max_iterations:
+            raise RuntimeError(f"Boucle for a dépassé {max_iterations} itérations, possible boucle infinie")
+        
         env.insert(node.var, item)  # Pas de nouvel environnement pour la variable de boucle
         try:
             last_value = evaluate(node.body, env)
@@ -183,6 +202,9 @@ def _evaluate_for(node: PiFor, env: EnvFrame) -> EnvValue:
             break
         except ContinueException:
             continue
+        except Exception as e:
+            # Propager les erreurs avec contexte de la boucle
+            raise type(e)(f"Erreur dans la boucle for (itération {iteration_count}): {str(e)}") from e
     return last_value
 
 def _evaluate_subscript(node: PiSubscript, env: EnvFrame) -> EnvValue:
@@ -192,13 +214,25 @@ def _evaluate_subscript(node: PiSubscript, env: EnvFrame) -> EnvValue:
     # Indexation pour liste, tuple ou chaîne
     if isinstance(collection, VList):
         idx = check_type(index, VNumber)
-        return collection.value[int(idx.value)]
+        idx_int = int(idx.value)
+        try:
+            return collection.value[idx_int]
+        except IndexError:
+            raise IndexError(f"Index {idx_int} hors limites pour une liste de longueur {len(collection.value)}")
     elif isinstance(collection, VTuple):
         idx = check_type(index, VNumber)
-        return collection.value[int(idx.value)]
+        idx_int = int(idx.value)
+        try:
+            return collection.value[idx_int]
+        except IndexError:
+            raise IndexError(f"Index {idx_int} hors limites pour un tuple de longueur {len(collection.value)}")
     elif isinstance(collection, VString):
         idx = check_type(index, VNumber)
-        return VString(collection.value[int(idx.value)])
+        idx_int = int(idx.value)
+        try:
+            return VString(collection.value[idx_int])
+        except IndexError:
+            raise IndexError(f"Index {idx_int} hors limites pour une chaîne de longueur {len(collection.value)}")
     else:
         raise TypeError("L'indexation n'est supportée que pour les listes, tuples et chaînes.")
 
@@ -218,20 +252,38 @@ def _evaluate_in(node: PiIn, env: EnvFrame) -> EnvValue:
 
 def _evaluate_function_call(node: PiFunctionCall, env: EnvFrame) -> EnvValue:
     """Évalue un appel de fonction (primitive ou définie par l'utilisateur)."""
-    like_a_function = evaluate_stmt(node.function, env)
+    try:
+        like_a_function = evaluate_stmt(node.function, env)
+    except NameError as e:
+        # Améliorer le message d'erreur pour les fonctions non définies
+        if isinstance(node.function, PiVariable):
+            raise NameError(f"Fonction '{node.function.name}' non définie") from e
+        raise
+    
     args = [evaluate_stmt(arg, env) for arg in node.args]
+    
     # Fonction primitive
     if callable(like_a_function):
-        return like_a_function(args)
+        try:
+            return like_a_function(args)
+        except Exception as e:
+            # Améliorer les messages d'erreur pour les fonctions primitives
+            func_name = getattr(like_a_function, '__name__', 'fonction primitive')
+            raise type(e)(f"Erreur dans {func_name}: {str(e)}") from e
     # Fonction utilisateur
     elif isinstance(like_a_function, VFunctionClosure):
         return _call_vfunction_closure(like_a_function, args)
     elif isinstance(like_a_function, VClassDef):   
        methods = like_a_function.methods
+       if "__init__" not in methods:
+           raise AttributeError(f"La classe '{like_a_function.name}' n'a pas de méthode '__init__'")
        my_init = methods["__init__"]
        new_object = VObject(class_def=like_a_function, attributes={})
        new_args = [new_object] + args
-       _call_vfunction_closure(my_init, new_args)
+       try:
+           _call_vfunction_closure(my_init, new_args)
+       except Exception as e:
+           raise type(e)(f"Erreur lors de l'initialisation de la classe '{like_a_function.name}': {str(e)}") from e
        return new_object
     elif isinstance(like_a_function, VMethodClosure):
         func = like_a_function.function
@@ -239,28 +291,47 @@ def _evaluate_function_call(node: PiFunctionCall, env: EnvFrame) -> EnvValue:
         new_args = [obj] + args
         return _call_vfunction_closure(func, new_args)
     else:
-        raise ValueError(f"Type de fonction non supporté")
+        func_type = type(like_a_function).__name__
+        raise TypeError(f"'{func_type}' n'est pas callable")
 
 def _call_vfunction_closure(like_a_function: VFunctionClosure, args: list[EnvValue]) -> EnvValue:
     funcdef = like_a_function.funcdef
     closure_env = like_a_function.closure_env
     call_env = EnvFrame(parent=closure_env)
+    
+    # Validation du nombre d'arguments
+    min_args = len(funcdef.arg_names)
+    max_args = min_args if not funcdef.vararg else float('inf')
+    
+    if len(args) < min_args:
+        raise TypeError(f"Fonction '{funcdef.name}' attend au moins {min_args} argument(s), {len(args)} fourni(s)")
+    
+    if not funcdef.vararg and len(args) > max_args:
+        raise TypeError(f"Fonction '{funcdef.name}' attend au maximum {max_args} argument(s), {len(args)} fourni(s)")
+    
+    # Attribution des arguments positionnels
     for i, arg_name in enumerate(funcdef.arg_names):
         if i < len(args):
             call_env.insert(arg_name, args[i])
         else:
             raise TypeError("Argument manquant pour la fonction.")
+    
+    # Gestion des arguments variadiques
     if funcdef.vararg:
         varargs = VList(args[len(funcdef.arg_names):])
         call_env.insert(funcdef.vararg, varargs)
     elif len(args) > len(funcdef.arg_names):
         raise TypeError("Trop d'arguments pour la fonction.")
+    
     result = VNone(value=None)
     try:
         for stmt in funcdef.body:
             result = evaluate_stmt(stmt, call_env)
     except ReturnException as ret:
         return ret.value
+    except Exception as e:
+        # Propager les erreurs avec contexte de la fonction
+        raise type(e)(f"Erreur dans la fonction '{funcdef.name}': {str(e)}") from e
     return result
 
 def _evaluate_class_def(node: PiClassDef, env: EnvFrame) -> EnvValue:
